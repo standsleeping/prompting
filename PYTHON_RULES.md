@@ -32,6 +32,8 @@ The data (data structures, dataclasses, Pydantic models, and types) are kept in 
 
 The functions (often "pure" functions, wherever possible) are kept in the functions folder.
 
+### The 1:1:1 Rule (Function:File:TestFile)
+
 We maintain a strict 1:1 correspondence between:
 1. functions and files: one function per file (in the functions folder).
 2. data and files: one data structure per file (in the data folder).
@@ -60,7 +62,7 @@ Allowing `dict[str, Any]` to persist into domain layers violates our architectur
 We use **translator functions** as the standard pattern for converting external data (JSON, HTTP requests) into domain objects. These functions have a single, narrow responsibility:
 - **Pure conversion**: Transform `dict[str, Any]` from requests into properly typed domain objects
 - **Boundary validation**: Handle conversion errors with appropriate HTTP responses
-- **No domain logic**: Never perform domain operations - only convert types and pass to domain layer
+- **No domain logic**: Never perform domain operations, only convert types and pass to domain layer
 - **Context-specific**: Must be understood in relation to the specific request type and target domain objects
 
 Critical: Translators do NOT take a request, convert it, AND do work with domain objects. They ONLY convert the request into domain objects, then pass those objects to the appropriate domain functions.
@@ -203,7 +205,7 @@ Both types:
 - **Only convert**: Transform external data to domain types
 - **Only validate boundaries**: Handle conversion errors and return appropriate error responses  
 - **Pass, don't execute**: Return properly typed domain objects for other functions to use
-- **No domain operations**: Never call domain functions directly - leave that to the calling context
+- **No domain operations**: Never call domain functions directly, leave that to the calling context
 
 ## Workflows
 
@@ -220,10 +222,106 @@ We follow a strictly functional programming style:
 4. Functions always have clear input and output types.
 5. Functions never mutate their arguments.
 
+### Function Composition
+
+Build complex operations by composing simple, focused functions. This makes code easier to test, understand, and modify.
+
+#### Composition Examples
+
+**BAD: Monolithic function:**
+```python
+def process_user_registration(raw_data: dict[str, Any]) -> tuple[dict[str, str], int]:
+    # Validation mixed with normalization and storage
+    if not raw_data.get('email'):
+        return {"error": "Email required"}, 400
+    
+    email = raw_data['email'].strip().lower()
+    if '@' not in email:
+        return {"error": "Invalid email"}, 400
+    
+    username = raw_data.get('username', '').strip()
+    if len(username) < 3:
+        return {"error": "Username too short"}, 400
+    
+    # Storage logic mixed in
+    try:
+        user = User(email=email, username=username)
+        storage.save_user(user)
+        return {"message": "User created"}, 201
+    except Exception as e:
+        return {"error": "Save failed"}, 500
+```
+
+**GOOD: Composed from small functions:**
+```python
+# Small, focused functions
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+def normalize_username(username: str) -> str:
+    return username.strip()
+
+def validate_email(email: str) -> Result[str, str]:
+    if not email:
+        return failure("Email required")
+    if '@' not in email:
+        return failure("Invalid email format")
+    return success(email)
+
+def validate_username(username: str) -> Result[str, str]:
+    if len(username) < 3:
+        return failure("Username must be at least 3 characters")
+    return success(username)
+
+def validate_user_data(email: str, username: str) -> Result[tuple[str, str], str]:
+    email_result = validate_email(email)
+    if isinstance(email_result, Failure):
+        return failure(email_result.error)
+    
+    username_result = validate_username(username)
+    if isinstance(username_result, Failure):
+        return failure(username_result.error)
+    
+    return success((email_result.value, username_result.value))
+
+# Composed operation
+def process_user_registration(raw_data: dict[str, Any]) -> Result[User, str]:
+    # Extract and normalize
+    raw_email = raw_data.get('email', '')
+    raw_username = raw_data.get('username', '')
+    
+    email = normalize_email(raw_email)
+    username = normalize_username(raw_username)
+    
+    # Validate
+    validation_result = validate_user_data(email, username)
+    if isinstance(validation_result, Failure):
+        return failure(validation_result.error)
+    
+    validated_email, validated_username = validation_result.value
+    
+    # Create domain object
+    user = User(email=validated_email, username=validated_username)
+    return success(user)
+```
+
+Note that, in accordinace with the 1:1:1 rule, this will create many files.
+
+#### Benefits of Composition
+
+- **Testable units**: Each function can be tested independently
+- **Reusable components**: Validation logic can be used elsewhere
+- **Clear dependencies**: Input/output relationships are explicit
+- **Easy debugging**: Step through individual functions
+- **Maintainable**: Change one aspect without affecting others
+
+
+### General Rules
+
 There are a few other general rules for how we write code:
 1. Always use `dedent` for multi-line strings.
 2. Avoid underscore method patterns; always prefer `this_func` over `_this_func`.
-3. Always prefer modern Python (3.12+) language and type features.
+3. Always prefer modern Python (3.13+) language and type features.
 4. Always use generic type parameter syntax (`class Foo[T]:` instead of `TypeVar`).
 5. Prefer union types with `|` syntax (`str | None` instead of `Union[str, None]`).
 6. Never use `if TYPE_CHECKING`.
@@ -249,6 +347,7 @@ We strictly follow modern Python typing conventions and avoid legacy typing patt
 - Only import from `typing` when necessary (e.g., `Any`, `Protocol`, `Literal`)
 - Never import: `List`, `Dict`, `Set`, `Tuple`, `Optional`, `Union`, `Generic`, `TypeVar`
 - Built-in types and union syntax eliminate most `typing` imports
+- Use `type` statement for type aliases instead of `TypeAlias`
 
 #### Domain Type Safety
 
@@ -261,23 +360,101 @@ We strictly follow modern Python typing conventions and avoid legacy typing patt
 - **Scattered Validation**: Without proper types, validation logic spreads as defensive checks
 - **Coupling to Transport**: Domain logic becomes coupled to JSON/HTTP structure
 
+### Result Types for Explicit Error Handling
+
+Instead of raising exceptions in domain logic, use Result types to make success and failure explicit. This improves testability and makes error handling more predictable.
+
+#### The Result Pattern
+
+```python
+@dataclass
+class Success[T]:
+    value: T
+    
+@dataclass  
+class Failure[E]:
+    error: E
+
+type Result[T, E] = Success[T] | Failure[E]
+
+# Helper functions
+def success[T](value: T) -> Success[T]:
+    return Success(value)
+
+def failure[E](error: E) -> Failure[E]:
+    return Failure(error)
+```
+
+#### Usage Examples
+
+**BAD: Exceptions in domain logic:**
+```python
+def calculate_user_score(user_data: dict[str, Any]) -> float:
+    if not user_data.get('points'):
+        raise ValueError("Points required")  # Exception in domain
+    
+    points = user_data.get('points', 0)
+    multiplier = user_data.get('multiplier', 1.0)
+    
+    if multiplier <= 0:
+        raise ValueError("Invalid multiplier")  # Exception in domain
+        
+    return points * multiplier
+```
+
+**GOOD: Result types with typed domain objects:**
+```python
+@dataclass
+class ScoreCalculationError:
+    message: str
+    field: str | None = None
+
+def calculate_user_score(user: User) -> Result[float, ScoreCalculationError]:
+    if user.points < 0:
+        return failure(ScoreCalculationError("Points cannot be negative", "points"))
+    
+    if user.multiplier <= 0:
+        return failure(ScoreCalculationError("Multiplier must be positive", "multiplier"))
+    
+    score = user.points * user.multiplier
+    return success(score)
+
+# Usage in integrator
+def process_user_score(user: User) -> tuple[dict[str, str], int]:
+    result = calculate_user_score(user)
+    
+    match result:
+        case Success(score):
+            return {"score": str(score)}, 200
+        case Failure(error):
+            return {"error": error.message}, 400
+```
+
+#### Benefits of Result Types
+
+- **Explicit error handling**: All possible outcomes are visible in the type signature
+- **No hidden exceptions**: Domain functions never throw, making them predictable
+- **Easier testing**: Test both success and failure paths without exception handling
+- **Composable**: Chain operations while preserving errors
+- **Type safe**: Compiler ensures all error cases are handled
+
 ##### Examples
 
-**BAD - Untyped dictionaries in domain:**
+**BAD: Untyped dictionaries in domain:**
 ```python
 def calculate_user_score(user_data: dict[str, Any]) -> float:
     # Domain logic coupled to JSON structure
     return user_data.get('points', 0) * user_data.get('multiplier', 1.0)
 ```
 
-**GOOD - Typed domain objects:**
+**GOOD: Typed domain objects:**
 ```python
 def calculate_user_score(user: User) -> float:
     # Domain logic works with proper types
     return user.points * user.multiplier
 ```
 
-**BAD - Passing dictionaries through layers:**
+**BAD: Passing dictionaries through layers:**
 ```python
 # In integrator
 def process_user_request(json_data: dict[str, Any]) -> dict[str, Any]:
