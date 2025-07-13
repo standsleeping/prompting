@@ -43,6 +43,29 @@ At the same level as the functions and data folders, there may also exist:
 - Protocols.
 - Subpackages, which themselves have the same data and functions structure as the subpackage they are in.
 
+### Boundary Management
+
+A critical aspect of hexagonal architecture is proper boundary management between layers. We enforce strict type safety at system boundaries:
+
+#### The dict[str, Any] Antipattern
+
+Allowing `dict[str, Any]` to persist into domain layers violates our architectural principles:
+- **Loss of Type Safety**: No IDE support, no compile-time checks, runtime errors
+- **Domain Modeling Failure**: Domain objects should represent business concepts with clear contracts
+- **Scattered Validation**: Without proper deserialization, validation spreads throughout the codebase
+- **Coupling to Transport**: Domain logic becomes coupled to JSON structure
+
+#### Translator Functions
+
+We use **translator functions** as the standard pattern for converting external data (JSON, HTTP requests) into domain objects. These functions have a single, narrow responsibility:
+- **Pure conversion**: Transform `dict[str, Any]` from requests into properly typed domain objects
+- **Boundary validation**: Handle conversion errors with appropriate HTTP responses
+- **No domain logic**: Never perform domain operations - only convert types and pass to domain layer
+- **Context-specific**: Must be understood in relation to the specific request type and target domain objects
+
+Critical: Translators do NOT take a request, convert it, AND do work with domain objects. They ONLY convert the request into domain objects, then pass those objects to the appropriate domain functions.
+
+See TRANSLATORS.md for detailed implementation guidelines.
 
 ### Dependencies
 
@@ -160,9 +183,31 @@ Notes on integrators:
 - Size of test suite is proportional to variety of return conditions.
 - Tests NEVER mock or stub user code; always RUNS code that integrator depends on.
 
+### Translator Functions: Units or Integrators
+
+Translator functions sit at system boundaries with a highly focused scope, and can be either units or integrators depending on their dependencies:
+
+**Translator as Unit:**
+- **Pure conversion**: Direct transformation of `dict[str, Any]` to domain types using only built-in functions
+- **No dependencies**: Uses only standard library functions (uuid.UUID, datetime.fromisoformat, etc.)
+- **No imports**: No calls to other application functions
+- **Example**: Converting string to UUID, parsing ISO datetime, basic type coercion
+
+**Translator as Integrator:**
+- **Composed conversion**: Calls other units/integrators to perform complex translations
+- **Has dependencies**: Uses validation units, parsing integrators, or lookup functions
+- **Assembles results**: Combines multiple conversion operations into domain objects
+- **Example**: Converting request data that requires validation against existing domain rules
+
+Both types:
+- **Only convert**: Transform external data to domain types
+- **Only validate boundaries**: Handle conversion errors and return appropriate error responses  
+- **Pass, don't execute**: Return properly typed domain objects for other functions to use
+- **No domain operations**: Never call domain functions directly - leave that to the calling context
+
 ## Workflows
 
-"Simple things should be simple, complex things should be possible." — Alan Kay
+"Simple things should be simple, complex things should be possible." — Alan Kay
 
 Code changes in this project should typically start at the highest level, where we model the system's user's request or command, and cascade "all the way down" into the lower levels of the system, making architectural and code changes as necessary along that path down through all layers of abstraction. The reasoning behind this order of operations follows from the ultimate aim of this project: ease of use and power of expression. If we decide to add a feature or extend certain behavior of the system, we should first focus on how that specific behavior is *expressed* by the user of the software. How do _they_ see the world, how do they express the outcome they desire, and how then can our system most naturally model their intent? Always start with the user, and work backwards from there. As we proceed through the layers of abstraction, we can think of each interface boundary as having users/clients/consumers in isolation, more abstractly. For example: if some other higher-level package were using this interface, what would feel most natural?
 
@@ -204,6 +249,79 @@ We strictly follow modern Python typing conventions and avoid legacy typing patt
 - Only import from `typing` when necessary (e.g., `Any`, `Protocol`, `Literal`)
 - Never import: `List`, `Dict`, `Set`, `Tuple`, `Optional`, `Union`, `Generic`, `TypeVar`
 - Built-in types and union syntax eliminate most `typing` imports
+
+#### Domain Type Safety
+
+**Never allow `dict[str, Any]` in domain layers**. This is a critical antipattern that violates type safety and domain modeling principles.
+
+##### Why dict[str, Any] is Forbidden in Domain Code
+
+- **Loss of Type Safety**: No IDE autocomplete, no compile-time checks, runtime errors from typos
+- **Domain Modeling Failure**: Domain objects should represent business concepts with clear contracts
+- **Scattered Validation**: Without proper types, validation logic spreads as defensive checks
+- **Coupling to Transport**: Domain logic becomes coupled to JSON/HTTP structure
+
+##### Examples
+
+**BAD - Untyped dictionaries in domain:**
+```python
+def calculate_user_score(user_data: dict[str, Any]) -> float:
+    # Domain logic coupled to JSON structure
+    return user_data.get('points', 0) * user_data.get('multiplier', 1.0)
+```
+
+**GOOD - Typed domain objects:**
+```python
+def calculate_user_score(user: User) -> float:
+    # Domain logic works with proper types
+    return user.points * user.multiplier
+```
+
+**BAD - Passing dictionaries through layers:**
+```python
+# In integrator
+def process_user_request(json_data: dict[str, Any]) -> dict[str, Any]:
+    # Dictionary propagates through system
+    result = user_service.update_profile(json_data)
+    return result
+```
+
+**GOOD - Use translator pattern at boundaries:**
+```python
+# In translator function (see TRANSLATORS.md)
+async def process_user_request(request: Request) -> tuple[dict[str, str], int]:
+    # Immediate deserialization at boundary
+    data = await request.json()
+    
+    # Convert to domain types
+    try:
+        user_id = uuid.UUID(data.get("user_id"))
+    except (ValueError, TypeError):
+        return {"error": "Invalid user_id"}, 400
+    
+    # Work with typed domain objects
+    user = user_service.get_user(user_id)
+    result = user_service.update_profile(user)
+    
+    return {"message": "Profile updated"}, 200
+```
+
+##### Exceptions
+
+The only exceptions for `dict[str, Any]` in domain code:
+- Truly dynamic data where structure is part of the domain (e.g., CMS storing arbitrary JSON)
+- Even then, wrap in a value object that provides controlled access:
+
+```python
+class DynamicContent:
+    """Encapsulates truly dynamic JSON content."""
+    def __init__(self, data: dict[str, Any]):
+        self._data = data
+    
+    def get_field(self, path: str, default: Any = None) -> Any:
+        """Controlled access to dynamic data with validation."""
+        # Implementation
+```
 
 ## Progress
 
