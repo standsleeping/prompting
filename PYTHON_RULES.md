@@ -119,6 +119,23 @@ with mock_boundaries(
 
 Never mock application functions, classes, or methods - only external system boundaries.
 
+### Rules and System Design
+
+Here are a few rules for how testing makes systems easier to reason about:
+
+- Each layer of abstraction has a list of "rules" or invariants that must be maintained.
+- This is one of many ways to implement "business logic."
+- Each rule, ideally, has a test.
+- Different layers of abstraction have a different specificity of rules.
+- The "correctness" of a rule should be demonstrated in a test in the same way a User would be able to demonstrate it.
+- (For lower-level rules below the user-level of abstraction, you can demonstrate them as an engineer would).
+- Simple unnested lists of rules/invariants/constraints, in domain/business language, makes systems easier to reason about.
+- Knowing where these rules are maintained makes them easier to find.
+- Seeing rules presented together in a consistent way makes them easier to understand.
+- It also makes gaps easier to identify.
+- Encoding the rules in TESTS is helpful for making the system easier to change.
+- If the rules are _only_ self-evident in code, then changing the system is harder.
+
 ## "Integrators" and "Units"
 
 All subpackages contain functions that are one of two types:
