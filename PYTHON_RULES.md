@@ -39,11 +39,11 @@ We maintain a strict 1:1 correspondence between:
 2. data and files: one data structure per file (in the data folder).
 3. files and tests: one file, one test suite.
 
-At the same level as the functions and data folders, there may also exist:
+At the same level as the functions and data folders, there may also exist subpackages for:
 
-- Traditional classes, if they are not "pure" and/or are not easily expressed as functions (this is VERY rare).
-- Protocols.
-- Subpackages, which themselves have the same data and functions structure as the subpackage they are in.
+- `classes/`: traditional classes, if they are not "pure" and/or are not easily expressed as functions (this is VERY rare).
+- `protocols/`: protocols, either exposed to consumers or used internally.
+- Subpackages, with semantically meaningful names, themselves having the same data/functions structure as the subpackage they are in.
 
 ### Boundary Management
 
