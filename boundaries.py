@@ -3,9 +3,9 @@ Centralized module for mocking all boundary-level interactions in tests.
 
 This module provides a unified interface for mocking:
 - HTTP requests and responses
+- HTTP Session data
 - File system operations
 - Environment variables
-- Database interactions (if needed)
 - Other external system boundaries
 """
 
@@ -16,9 +16,11 @@ from typing import Any, Protocol
 from tempfile import TemporaryDirectory
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from urllib.parse import urlencode
 
 import respx
 from httpx import Response
+from starlette.requests import Request
 
 
 # ==============================================================================
@@ -50,6 +52,71 @@ class MockHttpResponse:
             return Response(self.status_code, text=self.text_data, headers=headers)
         else:
             return Response(self.status_code, headers=headers)
+
+
+class MockState:
+    """Mock request state object for adding state attributes."""
+
+    def __init__(self, data: dict[str, Any]):
+        for key, value in data.items():
+            setattr(self, key, value)
+
+
+def mock_request(
+    form_data: dict[str, Any] | None = None,
+    session_data: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    path: str = "/",
+    method: str = "POST",
+) -> Request:
+    """
+    Create a real Starlette Request object for testing TRANSLATOR functions.
+
+    Args:
+        form_data: Dictionary of form field data
+        session_data: Dictionary of session data
+        state: Dictionary of request state data
+        path: Request path
+        method: HTTP method
+
+    Returns:
+        Real Starlette Request object
+    """
+    # Encode form data as URL-encoded string
+    form_body = b""
+    if form_data:
+        form_body = urlencode(form_data).encode("utf-8")
+
+    # Create ASGI scope
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"content-length", str(len(form_body)).encode()),
+        ],
+    }
+
+    # Create receive function that provides the form data
+    async def receive():
+        return {"type": "http.request", "body": form_body, "more_body": False}
+
+    # Create the request
+    request = Request(scope, receive)
+
+    # Add session data if provided
+    if session_data:
+        request._session = session_data  # type: ignore
+
+    # Add state data if provided
+    if state:
+        # Set state attributes individually to avoid assignment warning
+        for key, value in state.items():
+            setattr(request.state, key, value)
+
+    return request
 
 
 class HttpMocker(Protocol):
@@ -154,6 +221,27 @@ def mock_filesystem(structure: MockFileSystem | None = None):
 
 
 # ==============================================================================
+# Session Management
+# ==============================================================================
+
+from unittest.mock import patch
+
+
+@contextmanager
+def mock_session(session_data: dict[str, Any] | None = None):
+    """
+    Context manager for mocking Starlette session data.
+
+    Args:
+        session_data: Dictionary of session data to set
+    """
+    session = session_data or {}
+
+    with patch("starlette.requests.Request.session", session):
+        yield session
+
+
+# ==============================================================================
 # Environment Variables
 # ==============================================================================
 
@@ -188,3 +276,36 @@ def mock_env(variables: dict[str, str] | None = None, clear_prefix: str | None =
         # Restore original environment
         os.environ.clear()
         os.environ.update(env_backup)
+
+
+@contextmanager
+def mock_boundaries(
+    http_mocks: dict[str, MockHttpResponse] | None = None,
+    filesystem: MockFileSystem | None = None,
+    env_vars: dict[str, str] | None = None,
+    clear_env_prefix: str | None = None,
+    session_data: dict[str, Any] | None = None,
+):
+    """
+    Comprehensive context manager for mocking all boundary interactions.
+
+    Args:
+        http_mocks: Dict of URL to MockHttpResponse mappings
+        filesystem: MockFileSystem structure to create
+        env_vars: Environment variables to set
+        clear_env_prefix: Clear env vars with this prefix
+        session_data: Session data to set
+
+    Yields:
+        tuple: (http_mocker, filesystem_path, session)
+    """
+    with mock_http() as http_mocker:
+        # Set up HTTP mocks
+        if http_mocks:
+            for url, response in http_mocks.items():
+                http_mocker.mock_any(url, response)
+
+        with mock_filesystem(filesystem) as fs_path:
+            with mock_env(env_vars, clear_env_prefix):
+                with mock_session(session_data) as session:
+                    yield http_mocker, fs_path, session
