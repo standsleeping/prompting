@@ -64,6 +64,8 @@ class MockState:
 
 def mock_request(
     form_data: dict[str, Any] | None = None,
+    json_data: dict[str, Any] | None = None,
+    query_params: dict[str, str] | None = None,
     session_data: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     path: str = "/",
@@ -73,7 +75,9 @@ def mock_request(
     Create a real Starlette Request object for testing TRANSLATOR functions.
 
     Args:
-        form_data: Dictionary of form field data
+        form_data: Dictionary of form field data (for web APIs)
+        json_data: Dictionary of JSON data (for JSON APIs)
+        query_params: Dictionary of query parameters
         session_data: Dictionary of session data
         state: Dictionary of request state data
         path: Request path
@@ -82,26 +86,40 @@ def mock_request(
     Returns:
         Real Starlette Request object
     """
-    # Encode form data as URL-encoded string
-    form_body = b""
-    if form_data:
-        form_body = urlencode(form_data).encode("utf-8")
+    # Determine content type and body based on data provided
+    if json_data is not None:
+        # JSON request
+        body = json.dumps(json_data).encode("utf-8")
+        content_type = b"application/json"
+    elif form_data is not None:
+        # Form request
+        body = urlencode(form_data).encode("utf-8")
+        content_type = b"application/x-www-form-urlencoded"
+    else:
+        # Empty request
+        body = b""
+        content_type = b"text/plain"
+
+    # Handle query parameters
+    query_string = b""
+    if query_params:
+        query_string = urlencode(query_params).encode("utf-8")
 
     # Create ASGI scope
     scope = {
         "type": "http",
         "method": method,
         "path": path,
-        "query_string": b"",
+        "query_string": query_string,
         "headers": [
-            (b"content-type", b"application/x-www-form-urlencoded"),
-            (b"content-length", str(len(form_body)).encode()),
+            (b"content-type", content_type),
+            (b"content-length", str(len(body)).encode()),
         ],
     }
 
-    # Create receive function that provides the form data
+    # Create receive function that provides the request body
     async def receive():
-        return {"type": "http.request", "body": form_body, "more_body": False}
+        return {"type": "http.request", "body": body, "more_body": False}
 
     # Create the request
     request = Request(scope, receive)
